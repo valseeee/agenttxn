@@ -1,3 +1,12 @@
+# v0.5.0
+
+- Add optional PostgreSQL persistence with shared backend contracts and serialized ownership checks.
+- Fence stale database writers after explicit takeover; no remote-provider fencing claim.
+- Add read-only, payload-free telemetry, Prometheus metrics and actionable alert projections.
+- Pin GitHub repository identity before writes/reconciliation and paginate issue labels.
+- Add crash reliability benchmarks, separate-container network integration and scoped-token live CI.
+- Record independent agent security review, operational boundaries and upgrade instructions.
+
 # Changelog
 
 ## 0.4.0 — Provider evidence and release readiness

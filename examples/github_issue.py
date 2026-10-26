@@ -9,7 +9,7 @@ def main():
     if not token or not repo:
         print("Set GITHUB_TOKEN and AGENTTXN_GITHUB_REPO=owner/sandbox-repo",file=sys.stderr); return 2
     engine=Engine.open(".agenttxn/github-demo.db",policy=Policy(allowed_github_repositories=frozenset({repo})),adapters=[GitHubIssuesAdapter(token)])
-    tx=engine.create(intent=f"Create a test issue in {repo}",idempotency_key=f"github-demo:{repo}:v0.4.0")
+    tx=engine.create(intent=f"Create a test issue in {repo}",idempotency_key=f"github-demo:{repo}:v0.5.0")
     tx.add(ActionSpec("github.issue.create",{"repository":repo,"title":"[AgentTxn demo] Adapter test",
         "body":"Created by AgentTxn's optional GitHub adapter."},EffectClass.REVERSIBLE,f"github-demo:{repo}:issue"))
     prep=tx.prepare(); print("prepared:",prep.status.value)

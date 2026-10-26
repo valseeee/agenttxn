@@ -1,4 +1,4 @@
-# AgentTxn v0.4.0
+# AgentTxn v0.5.0
 
 **让 AI Agent 对真实世界的操作具有可审计、可暂停、可恢复的事务语义。**
 
@@ -6,16 +6,16 @@ AgentTxn 是 Python 3.11+ 的轻量级 Saga 事务协调器。它用 SQLite 持�
 
 > **不保证跨任意第三方 API 的原子性或 exactly-once。** 网络超时可能意味着“操作已成功、响应丢失”；系统会进入 `NEEDS_RECONCILIATION`，要求查询真实状态，而不是盲目重试。补偿也是一个新的业务动作，不是历史回滚。
 
-## v0.4.0 核对证据与发布加固
+## v0.5.0 剩余交接事项
 
-- 可选 `ProviderCapabilities` 与 `ReconciliationEvidence` 接口，兼容旧适配器；未确认的证据保持 UNKNOWN。
-- 校验执行与补偿的 JSON 对象结果，审计校验覆盖步骤和 attempt 状态。
-- Demo 状态损坏时停止推断；GitHub 标签缺失或 Issue 重开时保守保持 UNKNOWN。
-- 加入传输故障、锁竞争、真实子进程崩溃测试及显式启用的 GitHub 集成脚本。
-- CI 覆盖 Linux、Windows、macOS 与 Python 3.11/3.12/3.13；运行结果见 GitHub Actions。
+- 可选 PostgreSQL 后端：`pip install 'agenttxn[postgres]'`，SDK 使用 `Engine.open_postgres(dsn, ...)`；SQLite 保持默认且无需依赖。
+- 数据库写入在同一事务内校验 worker 身份，阻止被接管的旧 worker 写回迟到结果。
+- `metrics --format json|prometheus`、`alerts`、`tx telemetry <ID>` 提供不含业务载荷的诊断；SQLite 只读命令不建库、不迁移。
+- GitHub 写入与补偿绑定稳定 repository ID，标签查询读取全部分页。
+- 增加双后端合同测试、可重复故障基准、独立容器网络探针、最小权限 Actions Token 在线测试和独立代理安全审查。
 
-版本兼容性、验证边界与回滚说明见 `交接说明_0.4.0.md`。
-可选 provider 接口见 `docs/provider-capabilities.md`；P3 方向仅有设计说明，见 `docs/future-design.md`。
+兼容性与升级见 `交接说明_0.5.0.md`；后端和部署见 `docs/operations.md`。
+真实验证记录分别见本地 `*_RESULTS.txt`、GitHub Actions 和 Release 验证资产。容器部署在一个 CI 主机上运行，不代表物理多机容灾。
 
 ## v0.3.1 修复与验证
 
@@ -30,7 +30,7 @@ AgentTxn 是 Python 3.11+ 的轻量级 Saga 事务协调器。它用 SQLite 持�
 .venv\Scripts\python.exe -m pip install -e ".[dev]"
 .venv\Scripts\python.exe scripts\validate_release.py
 .venv\Scripts\python.exe scripts\build_zip.py
-.venv\Scripts\python.exe scripts\verify_zip.py dist\agenttxn-v0.4.0-source.zip
+.venv\Scripts\python.exe scripts\verify_zip.py dist\agenttxn-v0.5.0-source.zip
 ```
 
 Linux/macOS 使用 `.venv/bin/python`。当前运行证据见 `VALIDATION_RESULTS.txt` 和各 `*_RESULTS.txt`；远程 CI 与真实 GitHub 测试不由本地结果证明。
@@ -50,7 +50,7 @@ Linux/macOS 使用 `.venv/bin/python`。当前运行证据见 `VALIDATION_RESULT
 
 ## Windows 快速启动
 
-解压 ZIP 后进入 `agenttxn-v0.4.0` 文件夹，打开 PowerShell：
+解压 ZIP 后进入 `agenttxn-v0.5.0` 文件夹，打开 PowerShell：
 
 ```powershell
 py -3 -m venv .venv
@@ -140,7 +140,7 @@ python examples\github_issue.py
 
 默认禁止 GitHub 标签删除式补偿，因为无法证明某个同名标签是否由协作者同时添加。只有明确接受这个风险时，才可在 Python SDK 中使用 `GitHubIssuesAdapter(token, allow_label_compensation=True)`。
 
-Issue 创建使用隐藏标记辅助核对；目前仅检查最近一页最多 100 个 Issue，因此“未找到”仍视为 UNKNOWN，不会推断操作未发生。GitHub 在线端到端测试未在本次交付环境执行。
+Issue 创建使用隐藏标记辅助核对；目前仅检查最近一页最多 100 个 Issue，因此“未找到”仍视为 UNKNOWN，不会推断操作未发生。在线验证采用显式触发的 GitHub Actions，Token 仅授予 contents:read 和 issues:write；结果见 Release 验证资产。
 
 ## 状态语义
 
@@ -160,8 +160,8 @@ Issue 创建使用隐藏标记辅助核对；目前仅检查最近一页最多 1
 - 审计哈希链不是不可篡改存储：具有数据库完全写权限的攻击者可重写整条链。结果摘要也不能证明外部 provider 的真实性。
 - v0.2 旧计划在验证时兼容，但其 preflight 未被原始计划哈希绑定；`verify` 会提示 legacy。
 - 旧数据库自动迁移前请先备份，尤其是用于真实外部操作的数据库。
-- CLI 与示例仅用于单机演示；多进程部署、限流、真实 GitHub Token、生产告警仍需要单独验证。
+- PostgreSQL 支持共享数据库协调，CLI 当前仍使用 SQLite。生产容量、TLS、HA、限流与告警投递须按实际环境配置；内置告警仅输出待处置事项。
 
-详见 `交接说明_0.4.0.md`、`docs/architecture.md`、`docs/transaction-semantics.md`、`docs/adapters.md`、`docs/threat-model.md`。
+详见 `交接说明_0.5.0.md`、`docs/architecture.md`、`docs/transaction-semantics.md`、`docs/adapters.md`、`docs/threat-model.md`。
 
 许可证：Apache-2.0。

@@ -1,35 +1,28 @@
-# Release Checklist — v0.4.0
+# Release checklist — v0.5.0
 
-Local results must be regenerated with `python scripts/validate_release.py`. Consult
-`VALIDATION_RESULTS.txt` for the actual Python version and completion status. Do not
-carry successful results from any earlier baseline into this release.
+Source checklist describes required evidence. A configured test is not a successful run.
+`VALIDATION_RESULTS.txt`, CI run IDs and the Release manifest record actual results for
+the frozen commit. Historical 0.4.0 evidence is not reused as proof for changed source.
 
-- [x] Run unittest, pytest, compileall and both offline examples.
-- [x] Build wheel, install in a separate venv and verify the installed CLI version.
-- [x] Run script-generated CLI smoke against that wheel; count entries and summary.
-- [x] Verify old schema/plan/policy compatibility, future schema rejection without writes,
-      migration rollback and repeat opening.
-- [x] Verify malformed reconciliation without replay, forward and compensation UNKNOWN,
-      worker contention and abrupt exits at claim/call/writeback boundaries.
-- [x] Check exception redaction, GitHub allowlist and label-compensation opt-in.
-- [x] Confirm README, Chinese handoff, architecture, threat model and adapter docs agree.
+- [x] Implement optional PostgreSQL and test both backend contracts on real databases.
+- [x] Reproduce/fix stale worker database writeback, GitHub repository identity and labels pagination.
+- [x] Implement safe telemetry and actual read-only SQLite diagnostics.
+- [x] Execute seeded crash benchmark on SQLite and PostgreSQL with one call/effect assertions.
+- [x] Complete independent agent security review; review found bugs are fixed before freeze.
+- [x] Document schema/API compatibility, backup/rollback and production boundaries.
+- [ ] Final local unittest, pytest, compileall, demos, wheel install and CLI smoke.
+- [ ] Nine remote OS/Python combinations run successfully for the final commit.
+- [ ] PostgreSQL 18 contract/benchmark CI passes for the final commit.
+- [ ] Separate-worker-container ownership/HTTP response-loss CI passes for the final commit.
+- [ ] Manual live GitHub workflow uses contents:read/issues:write; all known test Issues close.
+- [ ] Source ZIP manifest/checksum, clean extraction tests and credential scan pass.
+- [ ] Frozen source, wheel, logs, manifest and checksums publish as a new Release.
 
-Archive verification is recorded after the ZIP closes in its `.zip.verification.txt`
-sidecar: SHA-256, manifest and tests from the clean extraction. It is deliberately
-separate from the embedded logs, which validate the working source before packaging.
+Last unchecked items are release-time operations. Their successful logs/manifest supersede
+this source-time pending status; this avoids committing claims before remote runs occur.
+Default offline tests intentionally skip 7 PostgreSQL tests without the explicit test DSN;
+the dedicated integration job supplies the DSN and must show no skipped backend tests.
 
-Items above are marked after local validation; logs are the evidence.
-The items below are recorded separately from local offline checks. GitHub Actions and
-Release validation assets are the evidence; a configured workflow alone is not a pass.
-
-- [ ] Run explicitly authorized live GitHub Issue tests in the chosen public repository;
-      close the test Issues and check for credential leakage. A least-privilege token audit
-      is separate from reusing an existing local login.
-- [ ] Run remote CI matrix for Python 3.11, 3.12 and 3.13; configuration is not evidence.
-- [ ] Validate Linux/macOS runtime; local Windows results do not prove those platforms.
-- [ ] Validate multi-process crash injection and recovery under real provider latency.
-- [x] Exercise SQLite busy/lock contention, conditional owner release and crash-boundary recovery.
-- [x] Review security-sensitive code and document findings in `security-review.md`.
-- [x] Document P3 backend, fencing, observability and benchmark designs in `future-design.md`.
-- [ ] Validate cross-machine deployment (outside the supported single-machine product scope).
-- [ ] Complete independent security review before production use.
+Physical multi-host outage/partition, PostgreSQL HA, production capacity and institutional
+third-party security certification are not tested or claimed. The user's one-host setup
+uses separate containers as the supported network integration alternative.

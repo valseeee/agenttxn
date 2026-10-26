@@ -38,7 +38,10 @@ def verify(archive_path):
                 raise ValueError('Expected a single source root')
             root_name = roots.pop()
             for required in ('src/agenttxn/engine.py', 'src/agenttxn/store.py', 'pyproject.toml',
-                             'README.md', 'LICENSE', 'tests/test_process_recovery.py', 'scripts/cli_smoke.py'):
+                             'README.md', 'LICENSE', 'tests/test_process_recovery.py', 'scripts/cli_smoke.py',
+                             'src/agenttxn/postgres.py', 'src/agenttxn/telemetry.py',
+                             'deploy/compose.yml', 'deploy/Dockerfile', 'scripts/network_probe.py',
+                             'docs/independent-security-review.md'):
                 if f'{root_name}/{required}' not in archive.namelist():
                     raise ValueError('Missing required file: ' + required)
             log.append(f'Manifest verified: {len(paths)} files')

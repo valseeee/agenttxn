@@ -7,9 +7,9 @@ ROOT=Path(__file__).resolve().parents[1]
 VERSION=tomllib.loads((ROOT/"pyproject.toml").read_text(encoding="utf-8"))["project"]["version"]
 OUT=ROOT/"dist"/f"agenttxn-v{VERSION}-source.zip"
 SKIP={".git","__pycache__",".pytest_cache",".ruff_cache","dist","build","validation"}
-DIRECTORIES={"src","tests","examples","docs","scripts",".github"}
+DIRECTORIES={"src","tests","examples","docs","scripts",".github","deploy"}
 FILES={"README.md","CHANGELOG.md","LICENSE","pyproject.toml","CONTRIBUTING.md",
-       "SECURITY.md","Makefile",".gitignore",f"交接说明_{VERSION}.md"}
+       "SECURITY.md","Makefile",".gitignore",".dockerignore",f"交接说明_{VERSION}.md"}
 
 def main():
     OUT.parent.mkdir(parents=True,exist_ok=True)

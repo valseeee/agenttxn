@@ -63,3 +63,17 @@ Release validation uses fake tokens in offline tests. Live tests require explici
 allowlisting and a confirmation flag, close their known test Issues, and keep credentials
 out of output. Existing local publishing credentials may have broader permissions than a
 dedicated least-privilege test token; no least-privilege audit is claimed.
+
+## 0.5.0 additions
+
+Database ownership is checked before scoped writes, including after a provider response.
+This prevents stale local writes, not duplicate external requests after unsafe takeover.
+PostgreSQL DSNs are private runtime configuration; driver errors are replaced with generic
+StorageError messages. Grant database access only to trusted coordinators: SQL writers can
+rewrite audit chains. Use TLS and service-scoped credentials in actual deployments.
+
+GitHub repository ID is frozen during prepare and rechecked before writes and reconciliation.
+A renamed/replaced slug fails closed. Label observations use every page; concurrent changes
+still cannot establish exclusive label ownership. Legacy unpinned GitHub plans are rejected.
+Payload-free telemetry is separate from raw local `show`/`events`, which expose stored records.
+The independent agent review is documented in `independent-security-review.md`.

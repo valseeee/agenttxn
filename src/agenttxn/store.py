@@ -1,8 +1,8 @@
 from __future__ import annotations
 from contextlib import contextmanager
 from pathlib import Path
-import hashlib, json, sqlite3, uuid
-from .errors import (ConcurrentModificationError, DuplicateIdempotencyKeyError, InvalidTransitionError, NotFoundError, PlanFrozenError)
+import hashlib, json, sqlite3, uuid, threading
+from .errors import (ConcurrentModificationError, DuplicateIdempotencyKeyError, InvalidTransitionError, NotFoundError, PlanFrozenError, StorageError)
 from .models import (ActionSpec, ApprovalRecord, EventRecord, StepRecord, StepStatus,
                      TransactionRecord, TransactionStatus, canonical_json, utc_now)
 from .state_machine import assert_step_transition, assert_transition
@@ -42,63 +42,26 @@ def _hash_event(txid, stepid, seq, typ, payload, created, previous):
             "payload":payload,"created_at":created,"previous_hash":previous}
     return hashlib.sha256(canonical_json(body).encode()).hexdigest()
 
-class SQLiteStore:
-    def __init__(self, path):
-        self.path = str(path)
-        if self.path != ":memory:":
-            Path(self.path).expanduser().resolve().parent.mkdir(parents=True, exist_ok=True)
-        with self._db() as c:
-            version=c.execute("PRAGMA user_version").fetchone()[0]
-            if version > 4:
-                raise RuntimeError(f"database schema version {version} is newer than supported version 4")
-            c.execute("PRAGMA journal_mode=WAL")
-            c.executescript(SCHEMA)
-        self._migrate()
-
-    def _migrate(self):
-        """Upgrade existing v0.2 SQLite databases in place, without JSON1."""
-        with self._db(True) as c:
-            version=c.execute("PRAGMA user_version").fetchone()[0]
-            if version > 4:
-                raise RuntimeError(f"database schema version {version} is newer than supported version 4")
-            step_cols={r["name"] for r in c.execute("PRAGMA table_info(steps)")}
-            if "action_idempotency_key" not in step_cols:
-                c.execute("ALTER TABLE steps ADD COLUMN action_idempotency_key TEXT")
-            # Drop the legacy expression index before UPDATE so migration works even
-            # when the SQLite build does not provide JSON1.
-            c.execute("DROP INDEX IF EXISTS idx_action_idempotency")
-            rows=c.execute("SELECT id,action_json FROM steps WHERE action_idempotency_key IS NULL").fetchall()
-            for row in rows:
-                key=json.loads(row["action_json"])["idempotency_key"]
-                c.execute("UPDATE steps SET action_idempotency_key=? WHERE id=?",(key,row["id"]))
-            c.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_action_idempotency ON steps(action_kind,action_idempotency_key)")
-            c.execute("""CREATE TRIGGER IF NOT EXISTS steps_key_required_insert
-                BEFORE INSERT ON steps WHEN NEW.action_idempotency_key IS NULL
-                BEGIN SELECT RAISE(ABORT, 'action idempotency key required'); END""")
-            c.execute("""CREATE TRIGGER IF NOT EXISTS steps_key_required_update
-                BEFORE UPDATE OF action_idempotency_key ON steps WHEN NEW.action_idempotency_key IS NULL
-                BEGIN SELECT RAISE(ABORT, 'action idempotency key required'); END""")
-            tx_cols={r["name"] for r in c.execute("PRAGMA table_info(transactions)")}
-            if "worker_token" not in tx_cols:
-                c.execute("ALTER TABLE transactions ADD COLUMN worker_token TEXT")
-            if "worker_claimed_at" not in tx_cols:
-                c.execute("ALTER TABLE transactions ADD COLUMN worker_claimed_at TEXT")
-            c.execute("PRAGMA user_version=4")
+class SQLStore:
+    """Shared parameterized SQL operations; each backend supplies atomic sessions."""
+    def __init__(self):
+        self._ownership=threading.local()
 
     @contextmanager
-    def _db(self, write=False):
-        c = sqlite3.connect(self.path, timeout=5)
-        c.row_factory = sqlite3.Row
-        c.execute("PRAGMA foreign_keys=ON")
-        c.execute("PRAGMA busy_timeout=5000")
+    def owner_scope(self, txid, token):
+        previous=getattr(self._ownership,"current",None)
+        self._ownership.current=(txid,token)
         try:
-            if write: c.execute("BEGIN IMMEDIATE")
-            yield c
-            if write: c.commit()
-        except Exception:
-            if write: c.rollback()
-            raise
-        finally: c.close()
+            yield
+        finally:
+            self._ownership.current=previous
+
+    def _check_owner(self, c):
+        owner=getattr(self._ownership,"current",None)
+        if owner is not None:
+            row=c.execute("SELECT worker_token FROM transactions WHERE id=?",(owner[0],)).fetchone()
+            if not row or row["worker_token"] != owner[1]:
+                raise ConcurrentModificationError("worker ownership changed; stop and reconcile before continuing")
 
     def _event(self, c, txid, typ, payload, stepid=None):
         row = c.execute("SELECT sequence,event_hash FROM events WHERE transaction_id=? ORDER BY sequence DESC LIMIT 1",(txid,)).fetchone()
@@ -150,9 +113,9 @@ class SQLiteStore:
 
     def release_worker(self, txid, token):
         with self._db(True) as c:
-            c.execute("UPDATE transactions SET worker_token=NULL,worker_claimed_at=NULL WHERE id=? AND worker_token=?",
+            changed=c.execute("UPDATE transactions SET worker_token=NULL,worker_claimed_at=NULL WHERE id=? AND worker_token=?",
                       (txid,token))
-            if c.execute("SELECT changes()").fetchone()[0]:
+            if changed.rowcount:
                 self._event(c,txid,"WORKER_RELEASED",{})
 
     def worker_info(self, txid):
@@ -173,9 +136,9 @@ class SQLiteStore:
             else:
                 assert_transition(current, target)
                 now = utc_now()
-                c.execute("UPDATE transactions SET status=?,updated_at=?,row_version=row_version+1 WHERE id=? AND status=?",
+                changed=c.execute("UPDATE transactions SET status=?,updated_at=?,row_version=row_version+1 WHERE id=? AND status=?",
                           (target.value, now, txid, current.value))
-                if c.execute("SELECT changes()").fetchone()[0] != 1:
+                if changed.rowcount != 1:
                     raise ConcurrentModificationError(f"transaction changed concurrently: {txid}")
                 payload = {"from": current.value, "to": target.value, **(event_payload or {})}
                 self._event(c, txid, "TRANSACTION_STATUS_CHANGED", payload)
@@ -271,9 +234,9 @@ class SQLiteStore:
             if row["status"] not in allowed:
                 return None
             assert_step_transition(StepStatus(row["status"]),target_status)
-            c.execute("UPDATE steps SET status=?,attempt_count=CASE WHEN ?='forward' THEN ? ELSE attempt_count END WHERE id=? AND status=?",
+            changed=c.execute("UPDATE steps SET status=?,attempt_count=CASE WHEN ?='forward' THEN ? ELSE attempt_count END WHERE id=? AND status=?",
                       (target_status.value, phase, attempt_no, sid, row["status"]))
-            if c.execute("SELECT changes()").fetchone()[0] != 1:
+            if changed.rowcount != 1:
                 return None
             c.execute("INSERT INTO attempts(id,transaction_id,step_id,attempt_no,phase,status,request_fingerprint,started_at) VALUES(?,?,?,?,?,'STARTED',?,?)",
                       (aid,txid,sid,attempt_no,phase,fingerprint,now))
@@ -306,10 +269,10 @@ class SQLiteStore:
                           (sid,phase)).fetchone()
             if not row:
                 return False
-            c.execute("UPDATE attempts SET status=?,finished_at=?,response_json=?,error_json=? WHERE id=? AND status='STARTED'",
+            changed=c.execute("UPDATE attempts SET status=?,finished_at=?,response_json=?,error_json=? WHERE id=? AND status='STARTED'",
                       (status,utc_now(),canonical_json(response) if response is not None else None,
                        canonical_json(error) if error is not None else None,row["id"]))
-            if c.execute("SELECT changes()").fetchone()[0] != 1:
+            if changed.rowcount != 1:
                 return False
             self._event(c,row["transaction_id"],"ATTEMPT_RECONCILED",{"attempt_id":row["id"],"step_id":sid,
                 "phase":phase,"status":status},sid)
@@ -319,10 +282,10 @@ class SQLiteStore:
         with self._db(True) as c:
             row=c.execute("SELECT transaction_id,step_id FROM attempts WHERE id=?",(aid,)).fetchone()
             if not row: raise NotFoundError(f"attempt not found: {aid}")
-            c.execute("UPDATE attempts SET status=?,finished_at=?,response_json=?,error_json=? WHERE id=? AND status='STARTED'",
+            changed=c.execute("UPDATE attempts SET status=?,finished_at=?,response_json=?,error_json=? WHERE id=? AND status='STARTED'",
                 (status,utc_now(),canonical_json(response) if response is not None else None,
                  canonical_json(error) if error is not None else None,aid))
-            if c.execute("SELECT changes()").fetchone()[0] != 1:
+            if changed.rowcount != 1:
                 raise ConcurrentModificationError("attempt already finished or reconciled")
             self._event(c,row["transaction_id"],"ATTEMPT_FINISHED",{"attempt_id":aid,"status":status,"error":error},row["step_id"])
 
@@ -340,9 +303,9 @@ class SQLiteStore:
             assert_transition(TransactionStatus.AWAITING_APPROVAL, TransactionStatus.APPROVED)
             c.execute("INSERT INTO approvals VALUES(?,?,?,?,?,'ACTIVE',?)",(aid,txid,plan_hash,approved_by,reason,now))
             self._event(c,txid,"APPROVAL_GRANTED",{"approval_id":aid,"plan_hash":plan_hash,"approved_by":approved_by})
-            c.execute("UPDATE transactions SET status=?,updated_at=?,row_version=row_version+1 WHERE id=? AND status=?",
+            changed=c.execute("UPDATE transactions SET status=?,updated_at=?,row_version=row_version+1 WHERE id=? AND status=?",
                       (TransactionStatus.APPROVED.value,now,txid,TransactionStatus.AWAITING_APPROVAL.value))
-            if c.execute("SELECT changes()").fetchone()[0] != 1:
+            if changed.rowcount != 1:
                 raise ConcurrentModificationError("transaction changed while approval was being recorded")
             self._event(c,txid,"TRANSACTION_STATUS_CHANGED",{"from":TransactionStatus.AWAITING_APPROVAL.value,
                 "to":TransactionStatus.APPROVED.value,"approval_id":aid})
@@ -371,6 +334,79 @@ class SQLiteStore:
             if actual != e.event_hash: return False, f"event hash mismatch at event {i}"
             prev=e.event_hash
         return True, f"verified {len(events)} events"
+
+
+class SQLiteStore(SQLStore):
+    def __init__(self, path, *, read_only=False):
+        super().__init__()
+        self.path = str(path)
+        self.read_only=read_only
+        if read_only:
+            if self.path == ':memory:' or not Path(self.path).expanduser().is_file():
+                raise StorageError('database does not exist; initialize it explicitly before diagnostics')
+            with self._db() as c:
+                version=c.execute('PRAGMA user_version').fetchone()[0]
+            if version != 4:
+                raise StorageError('diagnostics require schema v4; upgrade a backup explicitly before reading')
+            return
+        if self.path != ":memory:":
+            Path(self.path).expanduser().resolve().parent.mkdir(parents=True, exist_ok=True)
+        with self._db() as c:
+            version=c.execute("PRAGMA user_version").fetchone()[0]
+            if version > 4:
+                raise RuntimeError(f"database schema version {version} is newer than supported version 4")
+            c.execute("PRAGMA journal_mode=WAL")
+            c.executescript(SCHEMA)
+        self._migrate()
+
+    def _migrate(self):
+        """Upgrade existing v0.2 SQLite databases in place, without JSON1."""
+        with self._db(True) as c:
+            version=c.execute("PRAGMA user_version").fetchone()[0]
+            if version > 4:
+                raise RuntimeError(f"database schema version {version} is newer than supported version 4")
+            step_cols={r["name"] for r in c.execute("PRAGMA table_info(steps)")}
+            if "action_idempotency_key" not in step_cols:
+                c.execute("ALTER TABLE steps ADD COLUMN action_idempotency_key TEXT")
+            # Drop the legacy expression index before UPDATE so migration works even
+            # when the SQLite build does not provide JSON1.
+            c.execute("DROP INDEX IF EXISTS idx_action_idempotency")
+            rows=c.execute("SELECT id,action_json FROM steps WHERE action_idempotency_key IS NULL").fetchall()
+            for row in rows:
+                key=json.loads(row["action_json"])["idempotency_key"]
+                c.execute("UPDATE steps SET action_idempotency_key=? WHERE id=?",(key,row["id"]))
+            c.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_action_idempotency ON steps(action_kind,action_idempotency_key)")
+            c.execute("""CREATE TRIGGER IF NOT EXISTS steps_key_required_insert
+                BEFORE INSERT ON steps WHEN NEW.action_idempotency_key IS NULL
+                BEGIN SELECT RAISE(ABORT, 'action idempotency key required'); END""")
+            c.execute("""CREATE TRIGGER IF NOT EXISTS steps_key_required_update
+                BEFORE UPDATE OF action_idempotency_key ON steps WHEN NEW.action_idempotency_key IS NULL
+                BEGIN SELECT RAISE(ABORT, 'action idempotency key required'); END""")
+            tx_cols={r["name"] for r in c.execute("PRAGMA table_info(transactions)")}
+            if "worker_token" not in tx_cols:
+                c.execute("ALTER TABLE transactions ADD COLUMN worker_token TEXT")
+            if "worker_claimed_at" not in tx_cols:
+                c.execute("ALTER TABLE transactions ADD COLUMN worker_claimed_at TEXT")
+            c.execute("PRAGMA user_version=4")
+
+    @contextmanager
+    def _db(self, write=False):
+        if write and self.read_only: raise StorageError('database was opened read-only')
+        target=Path(self.path).expanduser().resolve().as_uri()+'?mode=ro' if self.read_only else self.path
+        c = sqlite3.connect(target, timeout=5,uri=self.read_only)
+        c.row_factory = sqlite3.Row
+        c.execute("PRAGMA foreign_keys=ON")
+        c.execute("PRAGMA busy_timeout=5000")
+        try:
+            if write:
+                c.execute("BEGIN IMMEDIATE")
+                self._check_owner(c)
+            yield c
+            if write: c.commit()
+        except Exception:
+            if write: c.rollback()
+            raise
+        finally: c.close()
 
     def raw_connection_for_tests(self):
         c=sqlite3.connect(self.path); c.row_factory=sqlite3.Row; return c

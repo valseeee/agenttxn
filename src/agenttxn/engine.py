@@ -11,16 +11,23 @@ from .errors import (ActionExecutionError, AdapterNotFoundError, ApprovalRequire
 from .models import (ActionSpec, CommitReport, EffectClass, PreparationReport, ReconcileOutcome,
     StepStatus, TransactionStatus, VerificationReport, canonical_json)
 from .policy import Policy
-from .store import SQLiteStore
+from .store import SQLStore, SQLiteStore
 
 class Engine:
-    def __init__(self, store: SQLiteStore, *, policy: Policy | None = None, adapters: Iterable[ActionAdapter] = ()):
+    def __init__(self, store: SQLStore, *, policy: Policy | None = None, adapters: Iterable[ActionAdapter] = ()):
         self.store=store; self.policy=policy or Policy.default_safe(); self._adapters={}; self._thread_owner=threading.local()
         for adapter in adapters: self.register(adapter)
 
     @classmethod
-    def open(cls, path: str | Path, *, policy=None, adapters=()):
-        return cls(SQLiteStore(path), policy=policy, adapters=adapters)
+    def open(cls, path: str | Path, *, policy=None, adapters=(), read_only=False):
+        if str(path).startswith(("postgresql://","postgres://")):
+            raise ValueError("use Engine.open_postgres() for PostgreSQL connections")
+        return cls(SQLiteStore(path,read_only=read_only), policy=policy, adapters=adapters)
+
+    @classmethod
+    def open_postgres(cls, dsn, *, policy=None, adapters=()):
+        from .postgres import PostgresStore
+        return cls(PostgresStore(dsn),policy=policy,adapters=adapters)
 
     def register(self, adapter):
         for kind in adapter.kinds:
@@ -91,7 +98,8 @@ def _worker_guard(fn):
         self.engine.store.claim_worker(self.id,token,force=takeover)
         owners[self.id]=token
         try:
-            return fn(self,*args,**kwargs)
+            with self.engine.store.owner_scope(self.id,token):
+                return fn(self,*args,**kwargs)
         finally:
             owners.pop(self.id,None)
             self.engine.store.release_worker(self.id,token)

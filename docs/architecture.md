@@ -54,3 +54,15 @@ Adapters may return structured evidence or the original tuple. Unconfirmed evide
 UNKNOWN and only confirmed outcomes can advance a step. The audit records evidence level
 and verifies persisted step/attempt statuses against their events. No schema migration is
 introduced. See `provider-capabilities.md` and `future-design.md` for API and design boundaries.
+
+## 0.5.0 shared storage and ownership
+
+`SQLStore` holds the existing SQL state machine operations. `SQLiteStore` retains schema v4
+and BEGIN IMMEDIATE. Optional `PostgresStore` uses its own schema v1 in `agenttxn`, bound
+parameters, short transactions and one database-scoped advisory write lock. The coarse lock
+prioritizes correctness over throughput; no network provider call holds a database lock.
+`Engine.open_postgres` selects this backend explicitly. This is not automatic SQLite migration.
+
+Within an engine worker scope, each write checks that worker token under the same serialized
+database transaction. Replaced workers cannot write late results. Tokens do not expire and
+external requests already in flight remain outside this protection. See `operations.md`.

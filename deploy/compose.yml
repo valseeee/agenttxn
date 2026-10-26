@@ -1,0 +1,53 @@
+# Isolated integration fixture, not a production database deployment.
+services:
+  postgres:
+    image: postgres:18
+    environment:
+      POSTGRES_USER: agenttxn
+      POSTGRES_PASSWORD: integration_test_only
+      POSTGRES_DB: agenttxn_test
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U agenttxn -d agenttxn_test"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+  provider:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    command: ["provider"]
+    environment:
+      AGENTTXN_POSTGRES_TEST_DSN: postgresql://agenttxn:integration_test_only@postgres/agenttxn_test
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/health')"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+  worker1:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    command: ["worker", "worker1"]
+    environment: &test_environment
+      AGENTTXN_POSTGRES_TEST_DSN: postgresql://agenttxn:integration_test_only@postgres/agenttxn_test
+    depends_on:
+      postgres: {condition: service_healthy}
+      provider: {condition: service_healthy}
+  worker2:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    command: ["worker", "worker2"]
+    environment: *test_environment
+    depends_on:
+      postgres: {condition: service_healthy}
+      provider: {condition: service_healthy}
+  coordinator:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    command: ["coordinate"]
+    environment: *test_environment
+    depends_on:
+      postgres: {condition: service_healthy}
+      provider: {condition: service_healthy}

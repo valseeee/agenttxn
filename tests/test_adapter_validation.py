@@ -45,8 +45,8 @@ class AdapterValidationTests(unittest.TestCase):
 
     def test_issue_create_missing_result_id_is_unknown(self):
         action=ActionSpec("github.issue.create",{"repository":"owner/repo","title":"test"},EffectClass.REVERSIBLE,"gh:missing-id")
-        with patch.object(self.github,"_request",return_value={"title":"test"}):
+        with patch.object(self.github,"_request",side_effect=[{"id":101},{"title":"test"}]):
             with self.assertRaises(OutcomeUnknownError):
-                self.github.execute(None,action,{"marker":"<!-- marker -->"})
+                self.github.execute(None,action,{"repository_id":101,"marker":"<!-- marker -->"})
 
 if __name__=="__main__": unittest.main()

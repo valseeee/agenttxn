@@ -16,3 +16,4 @@ class IntegrityVerificationError(AgentTxnError): pass
 class ConcurrentModificationError(AgentTxnError): pass
 
 class PolicyVersionMismatchError(AgentTxnError): pass
+class StorageError(AgentTxnError): pass

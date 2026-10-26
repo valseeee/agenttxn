@@ -55,7 +55,7 @@ class GitHubIssuesAdapter:
         data = json.dumps(body, allow_nan=False).encode() if body is not None else None
         req = Request(API_BASE + path, data=data, method=method, headers={
             "Accept":"application/vnd.github+json", "Authorization":f"Bearer {self._token}",
-            "X-GitHub-Api-Version":API_VERSION, "User-Agent":"agenttxn/0.4.0",
+            "X-GitHub-Api-Version":API_VERSION, "User-Agent":"agenttxn/0.5.0",
             "Content-Type":"application/json"})
         try:
             with urlopen(req, timeout=self.timeout) as resp:
@@ -85,37 +85,55 @@ class GitHubIssuesAdapter:
         h = hashlib.sha256(action.idempotency_key.encode()).hexdigest()[:24]
         return f"<!-- agenttxn:idempotency={h} -->"
 
+    def _same_repository(self,repo,preflight,result=None):
+        expected=(preflight or {}).get('repository_id') or (result or {}).get('repository_id')
+        if not isinstance(expected,int) or isinstance(expected,bool) or expected <= 0: return False
+        current=self._request('GET',f'/repos/{repo}')
+        return isinstance(current,dict) and current.get('id') == expected
+
+    def _labels(self,repo,number):
+        names=set(); page=1
+        while True:
+            labels=self._request('GET',f'{self._issue_path(repo,number)}/labels?per_page=100&page={page}')
+            if not isinstance(labels,list) or any(not isinstance(item,dict) or not isinstance(item.get('name'),str) for item in labels):
+                raise ActionExecutionError('GitHub returned an invalid label page')
+            names.update(item['name'] for item in labels)
+            if len(labels) < 100: return names
+            page+=1
+
     def preflight(self, context: AdapterContext, action: ActionSpec):
         self.validate(action); repo = self._repo(action.payload)
+        repository=self._request("GET",f"/repos/{repo}")
+        repository_id=repository.get('id') if isinstance(repository,dict) else None
+        if not isinstance(repository_id,int) or isinstance(repository_id,bool) or repository_id <= 0:
+            raise PreflightError('GitHub repository identity unavailable')
         if action.kind == "github.issue.create":
             # Read access is checked during prepare, before any write is attempted.
-            repository=self._request("GET", f"/repos/{repo}")
-            return {"marker":self._marker(action), "repository_id":repository.get("id"),
+            return {"marker":self._marker(action), "repository_id":repository_id,
                     "checked_at":datetime.now(timezone.utc).isoformat()}
         number = action.payload["issue_number"]
         issue = self._request("GET", self._issue_path(repo, number))
-        labels = self._request("GET", f"{self._issue_path(repo, number)}/labels")
-        return {"issue_state":issue.get("state"), "previous_labels":sorted(x["name"] for x in labels)}
+        labels = self._labels(repo,number)
+        return {"repository_id":repository_id,"issue_state":issue.get("state"), "previous_labels":sorted(labels)}
 
     def execute(self, context: AdapterContext, action: ActionSpec, preflight: dict[str, Any]):
         repo = self._repo(action.payload)
+        if not self._same_repository(repo,preflight):
+            raise ActionExecutionError("repository identity unavailable or changed after preflight")
         if action.kind == "github.issue.create":
-            repository=self._request("GET",f"/repos/{repo}")
-            if repository.get("id") != preflight.get("repository_id"):
-                raise ActionExecutionError("repository identity changed after preflight")
             marker = preflight["marker"]; body = action.payload.get("body", "")
             body = f"{body.rstrip()}\n\n{marker}" if body.strip() else marker
             payload = {"title":action.payload["title"], "body":body}
             if action.payload.get("labels"): payload["labels"] = action.payload["labels"]
             issue = self._request("POST", self._issue_path(repo), payload, write=True)
-            if not isinstance(issue, dict) or not isinstance(issue.get("number"), int):
+            if not isinstance(issue, dict) or not isinstance(issue.get("number"), int) or isinstance(issue['number'],bool) or issue['number'] <= 0:
                 raise OutcomeUnknownError("GitHub accepted or may have accepted the issue write but returned no usable issue number")
-            return {"issue_number":issue["number"], "html_url":issue.get("html_url"),
+            return {"repository_id":preflight['repository_id'],"issue_number":issue["number"], "html_url":issue.get("html_url"),
                     "marker":marker, "title":issue.get("title"),
                     "semantic_compensation":"close_issue", "restored_original_state":False}
         number = action.payload["issue_number"]
         previous = set((preflight or {}).get("previous_labels", []))
-        current = {x["name"] for x in self._request("GET", f"{self._issue_path(repo, number)}/labels")}
+        current = self._labels(repo,number)
         if current != previous:
             raise ActionExecutionError("issue labels changed since preflight; refusing stale write")
         requested = list(dict.fromkeys(action.payload["labels"]))
@@ -123,12 +141,14 @@ class GitHubIssuesAdapter:
                                   {"labels":requested}, write=True)
         if not isinstance(response, list) or any(not isinstance(x, dict) or not isinstance(x.get("name"), str) for x in response):
             raise OutcomeUnknownError("GitHub label write may have succeeded but returned an unusable label list")
-        return {"issue_number":number, "previous_labels":sorted(previous),
+        return {"repository_id":preflight['repository_id'],"issue_number":number, "previous_labels":sorted(previous),
                 "added_labels":sorted(set(requested)-previous),
                 "current_labels":sorted(x["name"] for x in response)}
 
     def compensate(self, context, action, result, preflight):
         repo = self._repo(action.payload)
+        if not self._same_repository(repo,preflight,result):
+            raise ActionExecutionError('repository identity unavailable or changed; refusing compensation')
         if action.kind == "github.issue.create":
             number = result.get("issue_number")
             if not number: raise ActionExecutionError("cannot close issue without issue_number")
@@ -145,6 +165,7 @@ class GitHubIssuesAdapter:
 
     def reconcile(self, context, action, phase, result, preflight):
         repo = self._repo(action.payload)
+        if not self._same_repository(repo,preflight,result): return ReconcileOutcome.UNKNOWN,None
         if phase == "forward":
             if action.kind == "github.issue.create":
                 marker = (preflight or {}).get("marker") or self._marker(action)
@@ -156,7 +177,7 @@ class GitHubIssuesAdapter:
                         "marker":marker,"title":x.get("title"),"semantic_compensation":"close_issue","restored_original_state":False}
                 return ReconcileOutcome.UNKNOWN, None
             number=action.payload["issue_number"]
-            current={x["name"] for x in self._request("GET",f"{self._issue_path(repo,number)}/labels")}
+            current=self._labels(repo,number)
             previous=set((preflight or {}).get("previous_labels",[])); requested=set(action.payload["labels"])
             if requested.issubset(current):
                 return ReconcileOutcome.SUCCEEDED, {"issue_number":number,"previous_labels":sorted(previous),
@@ -172,7 +193,7 @@ class GitHubIssuesAdapter:
             # The issue may have been closed and reopened; do not repeat compensation.
             return ReconcileOutcome.UNKNOWN, None
         number=action.payload["issue_number"]
-        names={x["name"] for x in self._request("GET",f"{self._issue_path(repo,number)}/labels")}
+        names=self._labels(repo,number)
         added=set(result.get("added_labels",[]))
         if names.isdisjoint(added): return ReconcileOutcome.SUCCEEDED, {"removed_labels":sorted(added)}
         # Labels may have been re-added by a collaborator after removal.

@@ -5,6 +5,7 @@ from enum import Enum
 from . import ActionSpec, EffectClass, Engine, Policy, __version__
 from .adapters import DemoAdapter, GitHubIssuesAdapter
 from .errors import AgentTxnError
+from . import telemetry
 
 def _engine(db, *, load_adapters=True):
     adapters=[]
@@ -16,7 +17,7 @@ def _engine(db, *, load_adapters=True):
             if allowed is None:
                 raise ValueError("Set AGENTTXN_GITHUB_REPOS=owner/repo to allow GitHub writes")
             adapters.append(GitHubIssuesAdapter(os.environ["GITHUB_TOKEN"]))
-    return Engine.open(db,policy=Policy(allowed_github_repositories=allowed),adapters=adapters)
+    return Engine.open(db,policy=Policy(allowed_github_repositories=allowed),adapters=adapters,read_only=not load_adapters)
 
 def _normalize(x):
     if isinstance(x,Enum): return x.value
@@ -33,11 +34,13 @@ def build_parser():
     subs=p.add_subparsers(dest="command",required=True)
     subs.add_parser("init")
     subs.add_parser("version")
+    q=subs.add_parser('metrics'); q.add_argument('--format',choices=['json','prometheus'],default='json')
+    subs.add_parser('alerts')
     tx=subs.add_parser("tx").add_subparsers(dest="txcmd",required=True)
     c=tx.add_parser("create"); c.add_argument("--intent",required=True); c.add_argument("--idempotency-key",required=True)
     a=tx.add_parser("add"); a.add_argument("transaction_id"); a.add_argument("--kind",required=True); a.add_argument("--payload",required=True); a.add_argument("--effect",choices=[e.value for e in EffectClass],required=True); a.add_argument("--idempotency-key",required=True)
     l=tx.add_parser("list"); l.add_argument("--limit",type=int,default=50)
-    for name in ("show","events","prepare","commit","resume","reconcile","verify"):
+    for name in ("show","events","telemetry","prepare","commit","resume","reconcile","verify"):
         q=tx.add_parser(name); q.add_argument("transaction_id")
         if name in {"reconcile","resume"}: q.add_argument("--confirm-worker-stopped",action="store_true")
     q=tx.add_parser("approve"); q.add_argument("transaction_id"); q.add_argument("--by",required=True); q.add_argument("--reason")
@@ -49,8 +52,14 @@ def main(argv=None):
     try:
         if args.command=="version":
             print(__version__); return 0
-        read_only=args.command=="tx" and args.txcmd in {"show","events","verify","list"}
+        read_only=args.command in {'metrics','alerts'} or (args.command=="tx" and args.txcmd in {"show","events","telemetry","verify","list"})
         engine=_engine(args.db,load_adapters=not read_only)
+        if args.command=='metrics':
+            report=telemetry.metrics(engine.store)
+            if args.format=='prometheus': print(telemetry.prometheus(report),end='')
+            else: _print(report)
+            return 0
+        if args.command=='alerts': _print(telemetry.alerts(engine.store)); return 0
         if args.command=="init":
             Path(args.db).parent.mkdir(parents=True,exist_ok=True)
             print(f"Initialized AgentTxn database: {args.db}"); return 0
@@ -65,6 +74,7 @@ def main(argv=None):
         tx=engine.load(args.transaction_id)
         if args.txcmd=="show": _print({"transaction":tx.record,"steps":tx.steps,"worker":engine.store.worker_info(tx.id)}); return 0
         if args.txcmd=="events": _print(engine.store.get_events(tx.id)); return 0
+        if args.txcmd=='telemetry': _print(telemetry.events(engine.store,tx.id)); return 0
         if args.txcmd=="prepare": _print(tx.prepare()); return 0
         if args.txcmd=="approve": _print(tx.approve(approved_by=args.by,reason=args.reason)); return 0
         if args.txcmd=="abort": _print(tx.abort(args.reason)); return 0

@@ -23,7 +23,7 @@ jobs:
       - run: python -m pip install -e '.[dev]'
       - run: python scripts/validate_release.py
       - run: python scripts/build_zip.py
-      - run: python scripts/verify_zip.py dist/agenttxn-v0.4.0-source.zip
+      - run: python scripts/verify_zip.py dist/agenttxn-v0.5.0-source.zip
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -31,3 +31,56 @@ jobs:
           path: |
             *_RESULTS.txt
             dist/*.verification.txt
+  postgres:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: agenttxn
+          POSTGRES_PASSWORD: integration_test_only
+          POSTGRES_DB: agenttxn_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U agenttxn -d agenttxn_test"
+          --health-interval 2s --health-timeout 2s --health-retries 30
+    env:
+      AGENTTXN_POSTGRES_TEST_DSN: postgresql://agenttxn:integration_test_only@localhost/agenttxn_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: python -m pip install -e '.[dev,postgres]'
+      - name: Backend contracts
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m pytest tests/test_store_contract.py tests/test_owner_guard.py -v | tee POSTGRES_RESULTS.txt
+      - name: Crash reliability benchmark
+        run: python scripts/benchmark.py --postgres --transactions 12 --workers 2 --latency-ms 30 > BENCHMARK_POSTGRES_RESULTS.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: postgres-validation
+          path: '*_RESULTS.txt'
+  containers:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Separate worker and provider network namespaces
+        shell: bash
+        run: |
+          set -o pipefail
+          docker compose -p agenttxn-integration -f deploy/compose.yml up --build --abort-on-container-exit --exit-code-from coordinator 2>&1 | tee CONTAINER_RESULTS.txt
+          grep '"status": "PASSED"' CONTAINER_RESULTS.txt
+      - name: Remove isolated fixtures
+        if: always()
+        run: docker compose -p agenttxn-integration -f deploy/compose.yml down -v
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: container-validation
+          path: CONTAINER_RESULTS.txt

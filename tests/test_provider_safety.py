@@ -60,20 +60,20 @@ class ProviderSafetyTests(unittest.TestCase):
 
     def test_missing_labels_do_not_prove_write_never_happened(self):
         adapter = GitHubIssuesAdapter('fake')
-        adapter._request = Mock(return_value=[])
+        adapter._request = Mock(side_effect=lambda method,path: {'id':101} if path=='/repos/owner/repo' else [])
         action = ActionSpec('github.issue.add_labels', {'repository': 'owner/repo', 'issue_number': 1,
                             'labels': ['new']}, EffectClass.REVERSIBLE, 'labels')
         outcome, _ = adapter.reconcile(AdapterContext('tx', 'step', 'query'), action, 'forward', None,
-                                        {'previous_labels': []})
+                                        {'repository_id':101,'previous_labels': []})
         self.assertEqual(outcome, ReconcileOutcome.UNKNOWN)
 
     def test_reopened_issue_does_not_prove_compensation_never_happened(self):
         adapter = GitHubIssuesAdapter('fake')
-        adapter._request = Mock(return_value={'state': 'open'})
+        adapter._request = Mock(side_effect=lambda method,path: {'id':101} if path=='/repos/owner/repo' else {'state':'open'})
         action = ActionSpec('github.issue.create', {'repository': 'owner/repo', 'title': 'x'},
                             EffectClass.REVERSIBLE, 'issue')
         outcome, _ = adapter.reconcile(AdapterContext('tx', 'step', 'query'), action, 'compensation',
-                                        {'issue_number': 1}, {})
+                                        {'issue_number': 1}, {'repository_id':101})
         self.assertEqual(outcome, ReconcileOutcome.UNKNOWN)
 
     def test_step_status_tampering_is_detected(self):

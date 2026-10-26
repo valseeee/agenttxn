@@ -46,3 +46,11 @@ Unexpected adapter exceptions and invalid return objects are UNKNOWN, not proof 
 failed write. Never put access tokens in action payloads or preflight results. An adapter's
 preflight should return only JSON-serializable, non-secret data. The engine's preconditions
 are a subset comparison against these preflight keys and cannot guarantee remote CAS.
+
+## GitHub repository identity in 0.5
+
+Preflight freezes the numeric repository ID. Execute, compensate and reconcile verify it;
+a replaced repository slug fails closed. Label queries read all pages. Old GitHub plans
+without the stable repository ID must not be replayed: inspect existing side effects first,
+then create a new reviewed transaction if appropriate. Action kinds and tuple evidence APIs
+are unchanged. A remaining lookup/write race cannot be eliminated without provider CAS.
