@@ -48,7 +48,7 @@ def verify(archive_path):
             # Explicitly bind imports to extracted source, ahead of any editable installation.
             commands = [
                 [sys.executable, '-c', "import sys; sys.path.insert(0, 'src'); import agenttxn; "
-                 "from pathlib import Path; assert Path(agenttxn.__file__).resolve().is_relative_to(Path.cwd()); "
+                 "from pathlib import Path; assert Path(agenttxn.__file__).resolve().is_relative_to(Path.cwd().resolve()); "
                  "import unittest; unittest.main(module=None, argv=['unittest','discover','-s','tests','-v'])"],
                 [sys.executable, '-c', "import sys; sys.path.insert(0, 'src'); import pytest; raise SystemExit(pytest.main(['-q']))"],
             ]

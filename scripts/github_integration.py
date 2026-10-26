@@ -4,11 +4,21 @@ import json
 import os
 from pathlib import Path
 import tempfile
+import time
 import uuid
 
 from agenttxn import ActionSpec, EffectClass, Engine, Policy, TransactionStatus
 from agenttxn.adapters import DemoAdapter, GitHubIssuesAdapter
 from agenttxn.errors import OutcomeUnknownError
+
+
+def reconcile_with_visibility_delay(tx):
+    """Only repeat read/query reconciliation; never resend an uncertain create."""
+    for attempt in range(6):
+        report = tx.reconcile()
+        if report.status != TransactionStatus.NEEDS_RECONCILIATION or attempt == 5:
+            return report
+        time.sleep(2)
 
 
 def run(repository):
@@ -54,7 +64,7 @@ def run(repository):
                     report = tx.commit()
                     if name == 'lost-response':
                         assert report.status == TransactionStatus.NEEDS_RECONCILIATION
-                        report = tx.reconcile()
+                        report = reconcile_with_visibility_delay(tx)
                     expected = TransactionStatus.COMPENSATED if name == 'compensation' else TransactionStatus.COMMITTED
                     assert report.status == expected
                     assert len(calls) == 1, 'Provider create must be called exactly once'

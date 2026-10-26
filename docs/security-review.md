@@ -18,6 +18,10 @@ CLI diagnostics, package filtering and credential handling in validation scripts
   with its latest digest while retaining older snapshots inside the verified event chain.
 - Future schema initialization changed tables before rejection: check the version first.
 - ZIP packaging could include extra environments/runtime data: use explicit source roots and filters.
+- Live GitHub Issue lists showed read-after-create visibility delay: the opt-in validator
+  now bounds repeated reconciliation queries without resending the uncertain create.
+- Windows CI used a short-name temporary directory: archive-origin verification now
+  resolves both paths before comparison, preserving the check across equivalent path aliases.
 
 Regression tests cover these paths. Network fault tests use fake tokens and suppress private
 exception text. Live validation is opt-in, allowlisted and closes only known test Issues.
