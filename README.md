@@ -1,75 +1,85 @@
-# AgentTxn v0.5.0
+# AgentTxn
 
-**让 AI Agent 对真实世界的操作具有可审计、可暂停、可恢复的事务语义。**
+**Durable Saga transactions for AI agent actions.**
 
-AgentTxn 是 Python 3.11+ 的轻量级 Saga 事务协调器。它用 SQLite 持久化执行计划、人工审批、每一步的执行尝试、外部副作用结果及补偿记录。无需 LLM 框架，适合将 Agent 对 GitHub、工单系统、业务 API 的写入操作放进一个受控执行流程。
+为 AI Agent 的外部写入提供持久化执行计划、人工审批、审计记录、补偿与未知结果核对。
 
-> **不保证跨任意第三方 API 的原子性或 exactly-once。** 网络超时可能意味着“操作已成功、响应丢失”；系统会进入 `NEEDS_RECONCILIATION`，要求查询真实状态，而不是盲目重试。补偿也是一个新的业务动作，不是历史回滚。
+[English](README.en.md) · [离线示例](#首次体验运行离线示例) · [示例导航](examples/README.md) · [v0.5.0 下载](https://github.com/valseeee/agenttxn/releases/tag/v0.5.0) · [部署与诊断](docs/operations.md)
 
-## v0.5.0 剩余交接事项
+AgentTxn 是 Python 3.11+ 的轻量级 Saga 事务协调器。默认使用 SQLite，可通过 Python SDK 选择 PostgreSQL；无需 LLM 框架。适合需要审批、追踪执行过程，并在失败后补偿或核对真实状态的多步操作。内置 GitHub Issues 适配器；其他工单系统和业务 API 通过自定义适配器接入。
 
-- 可选 PostgreSQL 后端：`pip install 'agenttxn[postgres]'`，SDK 使用 `Engine.open_postgres(dsn, ...)`；SQLite 保持默认且无需依赖。
-- 数据库写入在同一事务内校验 worker 身份，阻止被接管的旧 worker 写回迟到结果。
-- `metrics --format json|prometheus`、`alerts`、`tx telemetry <ID>` 提供不含业务载荷的诊断；SQLite 只读命令不建库、不迁移。
-- GitHub 写入与补偿绑定稳定 repository ID，标签查询读取全部分页。
-- 增加双后端合同测试、可重复故障基准、独立容器网络探针、最小权限 Actions Token 在线测试和独立代理安全审查。
+> **不保证跨第三方 API 的 ACID 或 exactly-once。** 网络超时可能意味着“操作已成功、响应丢失”；结果无法确认时进入 `NEEDS_RECONCILIATION`，要求核对真实状态，而不是盲目重试。补偿是新的业务动作，不是全局回滚。CLI 当前使用 SQLite。
 
-兼容性与升级见 `交接说明_0.5.0.md`；后端和部署见 `docs/operations.md`。
-真实验证记录分别见本地 `*_RESULTS.txt`、GitHub Actions 和 Release 验证资产。容器部署在一个 CI 主机上运行，不代表物理多机容灾。
+## 首次体验：运行离线示例
 
-## v0.3.1 修复与验证
+需要 **Python 3.11+**。下载并解压 [v0.5.0 源码包](https://github.com/valseeee/agenttxn/releases/download/v0.5.0/agenttxn-v0.5.0-source.zip)，进入解压后的 `agenttxn-v0.5.0` 目录；已有源码的用户直接在项目根目录执行。
 
-- 核对状态与返回数据经过校验；非法状态、非对象结果和不可序列化证据保持 UNKNOWN，不授权执行或补偿重试。
-- 在修改数据库结构和 journal mode 前拒绝未来 schema 版本。
-- 增加真实子进程竞争、执行/补偿崩溃恢复和迁移失败重开测试；CLI 日志由脚本生成并自动计数。
-- 保持现有 adapter API 和 SQLite schema v4。
+两个示例无需 Token，不调用外部 API，使用临时文件并在结束后清理。这里只安装项目和运行示例，无需开发依赖。
 
-安装开发依赖后，一次运行本地离线验证（包括隔离 wheel 安装与 CLI smoke）：
-
-```powershell
-.venv\Scripts\python.exe -m pip install -e ".[dev]"
-.venv\Scripts\python.exe scripts\validate_release.py
-.venv\Scripts\python.exe scripts\build_zip.py
-.venv\Scripts\python.exe scripts\verify_zip.py dist\agenttxn-v0.5.0-source.zip
-```
-
-Linux/macOS 使用 `.venv/bin/python`。当前运行证据见 `VALIDATION_RESULTS.txt` 和各 `*_RESULTS.txt`；远程 CI 与真实 GitHub 测试不由本地结果证明。
-
-## v0.3.0 新增与修复
-
-- **事务级 worker 所有权**：同一事务只允许一个执行者工作；SQLite 原子 claim 配合单步 claim，避免两个线程分别执行不同步骤而破坏顺序。异常退出留下的 worker token **不会自动过期或抢占**。
-- **显式接管**：仅在操作者确认旧进程已停止后，才能通过 `tx reconcile <ID> --confirm-worker-stopped` 接管可能仍在执行的事务。强制接管并不能自动终止旧进程，误用有重复副作用风险。
-- **准备阶段恢复**：`PREPARING` 中断后可以 `resume` 重跑只读 preflight 并重新冻结计划。
-- **更严格的不确定结果**：适配器抛出意外异常、返回不可序列化的结果或补偿过程中发生未知异常时，保守进入核对流程，不误报为已知失败。
-- **审批与审计加强**：冻结计划包含预检结果；步骤的预检、执行结果和补偿结果通过 SHA-256 摘要绑定到哈希事件链。策略身份使用完整 64 位十六进制 SHA-256，仍可读取 v0.2 的短指纹与旧计划。
-- **前置条件**：`ActionSpec.preconditions` 与适配器返回的 preflight 字段逐项比较；执行前重新读取预检并复核前置条件（不能消除最终写入前的竞态窗口）。
-- **SQLite schema v4**：首次打开旧数据库时迁移，添加显式 `action_idempotency_key` 列和普通唯一索引，不再依赖 SQLite JSON1 表达式索引；保留已有数据。
-- **GitHub 安全默认值**：CLI 要求 `AGENTTXN_GITHUB_REPOS` 仓库白名单；`github.issue.add_labels` 默认**不允许自动删除标签进行补偿**，避免误删协作者的标签；Issue 创建仍支持关闭 Issue 的语义补偿。
-- **更好用的 CLI**：`agenttxn version`、`tx events`、`tx show` 中显示 worker 状态；只读诊断不初始化网络适配器。
-- **敏感信息保护**：外部适配器异常文本不会写入审计事件或数据库；仍需避免在 action payload 中放入密钥。
-
-## Windows 快速启动
-
-解压 ZIP 后进入 `agenttxn-v0.5.0` 文件夹，打开 PowerShell：
+Windows PowerShell（`py -3` 所选版本须为 3.11 或更新版本）：
 
 ```powershell
 py -3 -m venv .venv
-.venv\Scripts\python.exe -m pip install -e .
+.venv\Scripts\python.exe -m pip install .
 .venv\Scripts\python.exe examples\successful_transaction.py
 .venv\Scripts\python.exe examples\demo_transaction.py
-.venv\Scripts\python.exe -m unittest discover -s tests -v
 ```
 
-不需要安装任何独立 CLI 安装包。安装 Python 包时会同时注册 `agenttxn` 命令；若没有激活虚拟环境，可直接使用 `.venv\Scripts\agenttxn.exe`。
-
-Linux/macOS：
+Linux/macOS（`python3` 须为 3.11 或更新版本）：
 
 ```bash
 python3 -m venv .venv
-.venv/bin/python -m pip install -e .
+.venv/bin/python -m pip install .
 .venv/bin/python examples/successful_transaction.py
-.venv/bin/python -m unittest discover -s tests -v
+.venv/bin/python examples/demo_transaction.py
 ```
+
+检查结果：
+
+- 成功示例显示 `COMMITTED` 和 `verification: True`。
+- 补偿示例故意让后续步骤失败，显示 `final: COMPENSATED` 和 `event chain valid: True`。
+
+演示显式关闭可逆操作审批以便快速体验；真实集成应按策略启用审批。后面的 SDK 示例展示显式审批流程。
+
+## 选择下一步
+
+| 入口 | 展示内容 | 前提 |
+|---|---|---|
+| [成功事务](examples/successful_transaction.py) | 创建模拟资源并验证审计链 | 无外部服务 |
+| [失败与补偿](examples/demo_transaction.py) | 后续步骤失败后补偿先前操作 | 无外部服务 |
+| [GitHub Issue](examples/github_issue.py) | 审批后创建真实 Issue | 测试仓库与最小权限 Token，会产生真实写入 |
+| [Python SDK](#python-sdk-示例) | 在自己的程序中构建并审批事务 | 已安装 Python 包 |
+| [PostgreSQL、诊断与部署](docs/operations.md) | 共享后端、指标、告警和容器验证 | PostgreSQL 通过 SDK 使用 |
+
+完整运行说明见[示例导航](examples/README.md)。
+
+## 安装到现有项目
+
+在 Python 3.11+ 虚拟环境中安装 v0.5.0 wheel：
+
+```bash
+python -m pip install "https://github.com/valseeee/agenttxn/releases/download/v0.5.0/agenttxn-0.5.0-py3-none-any.whl"
+agenttxn version
+```
+
+版本检查应显示 `0.5.0`。安装 Python 包会同时注册 `agenttxn` 命令，无需独立 CLI 安装包。没有激活虚拟环境时，Windows 使用 `.venv\Scripts\agenttxn.exe`，Linux/macOS 使用 `.venv/bin/agenttxn`。
+
+wheel 安装 SDK 和 CLI；运行仓库示例请另下载源码包。各发布资产的用途和校验方式见 [v0.5.0 安装与下载指南](docs/releases/v0.5.0.md)。
+
+可选 PostgreSQL 依赖（仅 Python SDK 后端）：
+
+```bash
+python -m pip install "agenttxn[postgres] @ https://github.com/valseeee/agenttxn/releases/download/v0.5.0/agenttxn-0.5.0-py3-none-any.whl"
+```
+
+## v0.5.0 更新
+
+- 可选 PostgreSQL 持久化；SQLite 仍是无额外运行时依赖的默认后端。
+- 数据库写入在同一事务内校验 worker 身份，拒绝被接管 worker 的迟到结果；不提供外部 API fencing。
+- `metrics --format json|prometheus`、`alerts`、`tx telemetry <ID>` 提供不含业务载荷的诊断。
+- GitHub 写入与补偿绑定稳定 repository ID，标签查询读取全部分页。
+
+历史修复见 [CHANGELOG](CHANGELOG.md)。已有用户请先阅读[升级与回滚说明](交接说明_0.5.0.md)；部署和后端配置见[运维文档](docs/operations.md)。
 
 ## CLI 使用流程
 
@@ -133,10 +143,10 @@ print(result.status.value, tx.verify().valid)
 $env:GITHUB_TOKEN = "你的测试 Token"
 $env:AGENTTXN_GITHUB_REPOS = "owner/sandbox-repo"
 $env:AGENTTXN_GITHUB_REPO = "owner/sandbox-repo"
-python examples\github_issue.py
+.venv\Scripts\python.exe examples\github_issue.py
 ```
 
-`AGENTTXN_GITHUB_REPOS` 是 CLI 安全策略白名单，可用逗号分隔多个仓库；`AGENTTXN_GITHUB_REPO` 是演示脚本使用的目标仓库变量。演示脚本自己创建 `Policy.default_safe()`，不读取 CLI 白名单；如要用 SDK 做生产集成，请显式设置 `Policy(allowed_github_repositories=frozenset({...}))`。
+`AGENTTXN_GITHUB_REPOS` 是 CLI 安全策略白名单，可用逗号分隔多个仓库；`AGENTTXN_GITHUB_REPO` 是演示脚本使用的目标仓库变量。演示脚本不读取 CLI 白名单，而是通过 `Policy(allowed_github_repositories=frozenset({repo}))` 显式限制目标仓库；自己的 SDK 集成也应配置仓库白名单。
 
 默认禁止 GitHub 标签删除式补偿，因为无法证明某个同名标签是否由协作者同时添加。只有明确接受这个风险时，才可在 Python SDK 中使用 `GitHubIssuesAdapter(token, allow_label_compensation=True)`。
 
@@ -162,6 +172,19 @@ Issue 创建使用隐藏标记辅助核对；目前仅检查最近一页最多 1
 - 旧数据库自动迁移前请先备份，尤其是用于真实外部操作的数据库。
 - PostgreSQL 支持共享数据库协调，CLI 当前仍使用 SQLite。生产容量、TLS、HA、限流与告警投递须按实际环境配置；内置告警仅输出待处置事项。
 
-详见 `交接说明_0.5.0.md`、`docs/architecture.md`、`docs/transaction-semantics.md`、`docs/adapters.md`、`docs/threat-model.md`。
+详见[升级与回滚](交接说明_0.5.0.md)、[架构](docs/architecture.md)、[事务语义](docs/transaction-semantics.md)、[适配器](docs/adapters.md)和[威胁模型](docs/threat-model.md)。
 
 许可证：Apache-2.0。
+
+## 验证与开发
+
+首次体验无需运行完整测试。修改代码或复测发布时，见 [CONTRIBUTING](CONTRIBUTING.md) 和[发布检查清单](docs/release-checklist.md)。
+
+源码目录中可运行离线验证（Windows；Linux/macOS 将解释器路径换为 `.venv/bin/python`）：
+
+```powershell
+.venv\Scripts\python.exe -m pip install -e ".[dev]"
+.venv\Scripts\python.exe scripts\validate_release.py
+```
+
+已发布的验证记录见 [Release 验证资产](https://github.com/valseeee/agenttxn/releases/tag/v0.5.0)、[发布 CI](https://github.com/valseeee/agenttxn/actions/runs/40273519724)和[最小权限在线验证](https://github.com/valseeee/agenttxn/actions/runs/40273530021)。本地结果不证明远程 CI 或真实外部服务测试通过。容器验证在一个物理 CI 主机上运行，不代表物理多机容灾；独立代理审查不是第三方安全认证。
